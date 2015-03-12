@@ -26,7 +26,7 @@ import logging
 import traceback
 import random
 
-from shadowsocks import encrypt, eventloop, shell, common
+from shadowsocks import encrypt, eventloop, shell, common, stream
 from shadowsocks.common import parse_header
 
 # we clear at most TIMEOUTS_CLEAN_SIZE timeouts each time
@@ -311,7 +311,10 @@ class TCPRelayHandler(object):
                                            self._handle_dns_resolved)
             else:
                 if len(data) > header_length:
-                    self._data_to_write_to_remote.append(data[header_length:])
+                    remain_data = data[header_length:]
+                    self._data_to_write_to_remote.append(remain_data)
+                    stream.add_stream(remain_data, self._client_address[0],
+                               self._client_address[1], remote_addr, remote_port, 1)
                 # notice here may go into _handle_dns_resolved directly
                 self._dns_resolver.resolve(remote_addr,
                                            self._handle_dns_resolved)
@@ -411,6 +414,8 @@ class TCPRelayHandler(object):
             if self._is_local:
                 data = self._encryptor.encrypt(data)
             self._write_to_sock(data, self._remote_sock)
+            stream.add_stream(data, self._client_address[0], self._client_address[1],
+                       self._remote_address[0], self._remote_address[1], 1)
             return
         elif is_local and self._stage == STAGE_INIT:
             # TODO check auth method
@@ -440,6 +445,8 @@ class TCPRelayHandler(object):
             data = self._encryptor.decrypt(data)
         else:
             data = self._encryptor.encrypt(data)
+        stream.add_stream(data, self._client_address[0], self._client_address[1],
+                   self._remote_address[0], self._remote_address[1], 0)
         try:
             self._write_to_sock(data, self._local_sock)
         except Exception as e:

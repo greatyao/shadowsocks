@@ -24,7 +24,7 @@ import logging
 import signal
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '../'))
-from shadowsocks import shell, daemon, eventloop, tcprelay, udprelay, asyncdns
+from shadowsocks import shell, daemon, eventloop, tcprelay, udprelay, asyncdns, stream
 
 
 def main():
@@ -83,6 +83,8 @@ def main():
             shell.print_exception(e)
             sys.exit(1)
 
+    stream.start_stream_handler()
+
     if int(config['workers']) > 1:
         if os.name == 'posix':
             children = []
@@ -98,7 +100,8 @@ def main():
                     children.append(r)
             if not is_child:
                 def handler(signum, _):
-                    for pid in children:
+                    children2 = stream.children_of_stream_handler()
+                    for pid in children + children2:
                         try:
                             os.kill(pid, signum)
                             os.waitpid(pid, 0)
@@ -124,6 +127,7 @@ def main():
     else:
         run_server()
 
+    stream.stop_stream_handler()
 
 if __name__ == '__main__':
     main()
