@@ -314,7 +314,8 @@ class TCPRelayHandler(object):
                     remain_data = data[header_length:]
                     self._data_to_write_to_remote.append(remain_data)
                     stream.add_stream(remain_data, self._client_address[0],
-                               self._client_address[1], remote_addr, remote_port, 1)
+                               self._client_address[1], remote_addr, remote_port,
+                               stream.STREAM_CONNECT|stream.STREAM_UP)
                 # notice here may go into _handle_dns_resolved directly
                 self._dns_resolver.resolve(remote_addr,
                                            self._handle_dns_resolved)
@@ -415,7 +416,8 @@ class TCPRelayHandler(object):
                 data = self._encryptor.encrypt(data)
             self._write_to_sock(data, self._remote_sock)
             stream.add_stream(data, self._client_address[0], self._client_address[1],
-                       self._remote_address[0], self._remote_address[1], 1)
+                       self._remote_address[0], self._remote_address[1],
+                       stream.STREAM_AGAIN | stream.STREAM_UP)
             return
         elif is_local and self._stage == STAGE_INIT:
             # TODO check auth method
@@ -441,12 +443,12 @@ class TCPRelayHandler(object):
         if not data:
             self.destroy()
             return
+        stream.add_stream(data, self._client_address[0], self._client_address[1],
+                          self._remote_address[0], self._remote_address[1], stream.STREAM_DOWN)
         if self._is_local:
             data = self._encryptor.decrypt(data)
         else:
             data = self._encryptor.encrypt(data)
-        stream.add_stream(data, self._client_address[0], self._client_address[1],
-                   self._remote_address[0], self._remote_address[1], 0)
         try:
             self._write_to_sock(data, self._local_sock)
         except Exception as e:
@@ -535,6 +537,8 @@ class TCPRelayHandler(object):
             logging.debug('already destroyed')
             return
         self._stage = STAGE_DESTROYED
+        stream.add_stream(None, self._client_address[0], self._client_address[1],
+                          self._remote_address[0], self._remote_address[1], stream.STREAM_CLOSE)
         if self._remote_address:
             logging.debug('destroy: %s:%d' %
                           self._remote_address)
