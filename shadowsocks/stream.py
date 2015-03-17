@@ -130,6 +130,7 @@ class RedisHandler(BaseHandler):
         BaseHandler.write(self, data, type)
 
     def destroy(self):
+        pipe = RedisHandler.r.pipeline()
         val =  '%d %s:%d %s:%d ' %(self.st, self.local_server, self.local_port, self.server_address, self.server_port)
         RedisHandler.r.set(self.key, val, ex = MAX_EXPIRE_TIME)
         RedisHandler.r.set(self.key_in, b''.join(self.indata), ex = MAX_EXPIRE_TIME)
@@ -138,6 +139,7 @@ class RedisHandler(BaseHandler):
         else:
             val = 'datalen=%d digest=%s' %(self.out_len, self.md5.hexdigest())
             RedisHandler.r.set(self.key_out, val, ex = MAX_EXPIRE_TIME)
+        pipe.execute()
         BaseHandler.destroy(self)
 
 class StreamData(object):
