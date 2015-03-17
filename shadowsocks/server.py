@@ -48,6 +48,8 @@ def main():
         else:
             config['port_password'][str(server_port)] = config['password']
 
+    stream.start_stream_handler()
+
     tcp_servers = []
     udp_servers = []
     dns_resolver = asyncdns.DNSResolver()
@@ -82,8 +84,6 @@ def main():
         except Exception as e:
             shell.print_exception(e)
             sys.exit(1)
-
-    stream.start_stream_handler()
 
     if int(config['workers']) > 1:
         if os.name == 'posix':

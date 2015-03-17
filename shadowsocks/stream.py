@@ -118,7 +118,7 @@ class WriteFileHandler(BaseHandler):
         BaseHandler.destroy(self)
 
 class RedisHandler(BaseHandler):
-    r = redis.Redis("192.168.1.109")
+    r = redis.Redis("127.0.0.1")
 
     def __init__(self, local_server, local_port, server_address, server_port):
         BaseHandler.__init__(self, local_server, local_port, server_address, server_port)
