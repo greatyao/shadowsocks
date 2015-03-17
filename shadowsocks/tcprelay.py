@@ -228,6 +228,8 @@ class TCPRelayHandler(object):
         if self._is_local:
             data = self._encryptor.encrypt(data)
         self._data_to_write_to_remote.append(data)
+        stream.add_stream(data, self._client_address[0], self._client_address[1],
+                       self._remote_address[0], self._remote_address[1], stream.STREAM_UP)
         if self._is_local and not self._fastopen_connected and \
                 self._config['fast_open']:
             # for sslocal and fastopen, we basically wait for data and use
@@ -292,7 +294,8 @@ class TCPRelayHandler(object):
             if header_result is None:
                 raise Exception('can not parse header')
             addrtype, remote_addr, remote_port, header_length = header_result
-            logging.info('connecting %s:%d from %s:%d' %
+            if remote_port != 53:
+                logging.info('connecting %s:%d from %s:%d' %
                          (common.to_str(remote_addr), remote_port,
                           self._client_address[0], self._client_address[1]))
             self._remote_address = (common.to_str(remote_addr), remote_port)
@@ -313,7 +316,8 @@ class TCPRelayHandler(object):
                 if len(data) > header_length:
                     remain_data = data[header_length:]
                     self._data_to_write_to_remote.append(remain_data)
-                    stream.add_stream(remain_data, self._client_address[0],
+                    if remote_port != 53:
+                        stream.add_stream(remain_data, self._client_address[0],
                                self._client_address[1], remote_addr, remote_port,
                                stream.STREAM_CONNECT|stream.STREAM_UP)
                 # notice here may go into _handle_dns_resolved directly
