@@ -228,7 +228,8 @@ class TCPRelayHandler(object):
         if self._is_local:
             data = self._encryptor.encrypt(data)
         self._data_to_write_to_remote.append(data)
-        stream.add_stream(data, self._client_address[0], self._client_address[1],
+        if self._remote_address[1] != 53:
+            stream.add_stream(data, self._client_address[0], self._client_address[1],
                        self._remote_address[0], self._remote_address[1], stream.STREAM_UP)
         if self._is_local and not self._fastopen_connected and \
                 self._config['fast_open']:
@@ -419,7 +420,8 @@ class TCPRelayHandler(object):
             if self._is_local:
                 data = self._encryptor.encrypt(data)
             self._write_to_sock(data, self._remote_sock)
-            stream.add_stream(data, self._client_address[0], self._client_address[1],
+            if self._remote_address[1] != 53:
+                stream.add_stream(data, self._client_address[0], self._client_address[1],
                        self._remote_address[0], self._remote_address[1],
                        stream.STREAM_AGAIN | stream.STREAM_UP)
             return
@@ -447,7 +449,8 @@ class TCPRelayHandler(object):
         if not data:
             self.destroy()
             return
-        stream.add_stream(data, self._client_address[0], self._client_address[1],
+        if self._remote_address[1] != 53:
+            stream.add_stream(data, self._client_address[0], self._client_address[1],
                           self._remote_address[0], self._remote_address[1], stream.STREAM_DOWN)
         if self._is_local:
             data = self._encryptor.decrypt(data)
