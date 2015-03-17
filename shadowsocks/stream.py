@@ -22,6 +22,8 @@ import logging
 import multiprocessing
 import random
 import uuid
+import redis
+import hashlib
 from shadowsocks import shell
 
 STREAM_CONNECT      = 0x01
@@ -30,7 +32,10 @@ STREAM_DOWN         = 0x04
 STREAM_AGAIN        = 0x08
 STREAM_CLOSE        = 0x10
 
-class InOutStreamHandler(object):
+MAX_OUT_BYTES = 1 << 20
+MAX_EXPIRE_TIME = 3600 * 24
+
+class BaseHandler(object):
     def __init__(self, local_server, local_port, server_address, server_port):
         self.indata = []
         self.outdata = []
@@ -39,6 +44,39 @@ class InOutStreamHandler(object):
         self.local_port = local_port
         self.server_address = server_address
         self.server_port = server_port
+        self.seq = 1
+        self.out_len = 0
+        self.md5 = None
+
+    def write(self, data, type):
+        '''
+        if type & STREAM_AGAIN:
+            self.infd.close()
+            self.outfd.close()
+            self.seq += 1
+        '''
+        if type & STREAM_UP:
+            self.indata.append(data)
+        elif type & STREAM_DOWN:
+            self.out_len += len(data)
+            if self.out_len <= MAX_OUT_BYTES:
+                self.outdata.append(data)
+            else:
+                if(self.md5 == None):
+                    self.md5 = hashlib.md5(b''.join(self.outdata))
+                    self.outdata = []
+                self.md5.update(data)
+        elif type & STREAM_CLOSE:
+            pass
+
+
+    def destroy(self):
+        del self.indata
+        del self.outdata
+
+class WriteFileHandler(BaseHandler):
+    def __init__(self, local_server, local_port, server_address, server_port):
+        BaseHandler.__init__(self,  local_server, local_port, server_address, server_port)
         self.day = time.strftime('%Y%m%d', time.localtime(self.st))
         try:
             os.mkdir(self.day)
@@ -50,35 +88,57 @@ class InOutStreamHandler(object):
         self.fd0.write('%d %s:%d %s:%d ' %(self.st, local_server, local_port, server_address, server_port))
         self.infile = self.folder + "/in"
         self.outfile = self.folder + "/out"
-        self.seq = 1
         self.infd  = open(self.infile + ".dat", "wb")
         self.outfd = open(self.outfile + ".dat", "wb")
 
     def write(self, data, type):
+        BaseHandler.write(self, data, type)
+
+        '''
         if type & STREAM_AGAIN:
-            self.infd.close()
-            self.outfd.close()
-            self.seq += 1
             self.infd  = open('%s-%d.dat' %(self.infile, self.seq), "wb")
             self.outfd = open('%s-%d.dat' %(self.outfile, self.seq), "wb")
-
+       '''
         if type & STREAM_UP:
-            self.indata.append(data)
             self.infd.write(data)
             self.infd.flush()
         elif type & STREAM_DOWN:
-            self.outdata.append(data)
-            self.outfd.write(data)
-            self.outfd.flush()
-        elif type & STREAM_CLOSE:
-            pass
+            if self.out_len <= MAX_OUT_BYTES:
+                self.outfd.write(data)
+            else:
+                self.outfd.truncate(0)
+                self.md5.update(data)
 
     def destroy(self):
         self.fd0.close()
         self.infd.close()
+        if self.md5 != None:
+            self.outfd.write('datalen=%d digest=%s' %(self.out_len, self.md5.hexdigest()))
         self.outfd.close()
-        del self.indata
-        del self.outdata
+        BaseHandler.destroy(self)
+
+class RedisHandler(BaseHandler):
+    r = redis.Redis("192.168.1.109")
+
+    def __init__(self, local_server, local_port, server_address, server_port):
+        BaseHandler.__init__(self, local_server, local_port, server_address, server_port)
+        self.key = '%d:%s_%d_%s_%d' %(self.st, local_server, local_port, server_address , server_port)
+        self.key_in = self.key + "_in"
+        self.key_out = self.key + "_out"
+
+    def write(self, data, type):
+        BaseHandler.write(self, data, type)
+
+    def destroy(self):
+        val =  '%d %s:%d %s:%d ' %(self.st, self.local_server, self.local_port, self.server_address, self.server_port)
+        RedisHandler.r.set(self.key, val, ex = MAX_EXPIRE_TIME)
+        RedisHandler.r.set(self.key_in, b''.join(self.indata), ex = MAX_EXPIRE_TIME)
+        if self.md5 == None:
+            RedisHandler.r.set(self.key_out, b''.join(self.outdata), ex = MAX_EXPIRE_TIME)
+        else:
+            val = 'datalen=%d digest=%s' %(self.out_len, self.md5.hexdigest())
+            RedisHandler.r.set(self.key_out, val, ex = MAX_EXPIRE_TIME)
+        BaseHandler.destroy(self)
 
 class StreamData(object):
     def __init__(self, data, local_server, local_port, server_address, server_port, type):
@@ -90,7 +150,7 @@ class StreamData(object):
         self.type = type
         self.st = int(time.time())
 
-class StreamOutput(object):
+class LoggingHandler(object):
 
     @classmethod
     def write(cls, one):
@@ -104,6 +164,7 @@ class StreamOutput(object):
 
 def process_stream(messages):
     handlers = {}
+    HandlerClass = RedisHandler
     while True:
         try:
             if messages.empty():
@@ -113,13 +174,13 @@ def process_stream(messages):
             k = '%s_%d_%s_%d' %(one.local_server, one.local_port, one.server_address , one.server_port)
             m = handlers.get(k, None)
             if m == None or (one.type & STREAM_CONNECT):
-                m = InOutStreamHandler(one.local_server, one.local_port, one.server_address , one.server_port)
+                m = HandlerClass(one.local_server, one.local_port, one.server_address , one.server_port)
                 handlers[k] = m
             m.write(one.data, one.type)
             if one.type & STREAM_CLOSE:
                 m.destroy()
                 del handlers[k]
-            StreamOutput.write(one)
+            LoggingHandler.write(one)
             del one
         except Exception as e:
             shell.print_exception(e)
