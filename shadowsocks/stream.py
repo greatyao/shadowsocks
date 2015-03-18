@@ -32,7 +32,7 @@ STREAM_DOWN         = 0x04
 STREAM_AGAIN        = 0x08
 STREAM_CLOSE        = 0x10
 
-MAX_OUT_BYTES = 1 << 20
+MAX_OUT_BYTES = 1 << 19 #512KB
 MAX_EXPIRE_TIME = 3600 * 24
 
 class BaseHandler(object):
@@ -45,6 +45,7 @@ class BaseHandler(object):
         self.server_address = server_address
         self.server_port = server_port
         self.seq = 1
+        self.in_len = 0
         self.out_len = 0
         self.md5 = None
 
@@ -56,6 +57,7 @@ class BaseHandler(object):
             self.seq += 1
         '''
         if type & STREAM_UP:
+            self.in_len += len(data)
             self.indata.append(data)
         elif type & STREAM_DOWN:
             self.out_len += len(data)
@@ -71,6 +73,9 @@ class BaseHandler(object):
 
 
     def destroy(self):
+        logging.info('%d: (%s:%d <--> %s:%d) %d/%d bytes'
+                     %(os.getpid(), self.local_server, self.local_port, self.server_address, self.server_port,
+                       self.in_len, self.out_len))
         del self.indata
         del self.outdata
 
@@ -122,7 +127,7 @@ class RedisHandler(BaseHandler):
 
     def __init__(self, local_server, local_port, server_address, server_port):
         BaseHandler.__init__(self, local_server, local_port, server_address, server_port)
-        self.key = '%d:%s_%d_%s_%d' %(self.st, local_server, local_port, server_address , server_port)
+        self.key = '%s:%d:%s_%d_%d' %(server_address, self.st, local_server, local_port, server_port)
         self.key_in = self.key + "_in"
         self.key_out = self.key + "_out"
 
@@ -152,18 +157,6 @@ class StreamData(object):
         self.type = type
         self.st = int(time.time())
 
-class LoggingHandler(object):
-
-    @classmethod
-    def write(cls, one):
-        if(one.type & STREAM_UP ):
-            logging.info('%d: %s:%d --> %s:%d %d bytes'
-                         %(one.st, one.local_server, one.local_port, one.server_address, one.server_port, len(one.data)))
-        elif(one.type & STREAM_DOWN ):
-            logging.info('%d: %s:%d --> %s:%d %d bytes'
-                        %(one.st, one.server_address, one.server_port, one.local_server, one.local_port, len(one.data)))
-        
-
 def process_stream(messages):
     handlers = {}
     HandlerClass = RedisHandler
@@ -182,7 +175,6 @@ def process_stream(messages):
             if one.type & STREAM_CLOSE:
                 m.destroy()
                 del handlers[k]
-            LoggingHandler.write(one)
             del one
         except Exception as e:
             shell.print_exception(e)
