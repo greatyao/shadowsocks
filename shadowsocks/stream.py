@@ -135,6 +135,8 @@ class RedisHandler(BaseHandler):
         BaseHandler.write(self, data, type)
 
     def destroy(self):
+        if self.in_len == 0 and self.out_len == 0:
+            return
         pipe = RedisHandler.r.pipeline()
         val =  '%d %s:%d %s:%d ' %(self.st, self.local_server, self.local_port, self.server_address, self.server_port)
         RedisHandler.r.set(self.key, val, ex = MAX_EXPIRE_TIME)
