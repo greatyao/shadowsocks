@@ -24,6 +24,7 @@ import random
 import uuid
 import redis
 import hashlib
+from ctypes import Structure, c_int
 from shadowsocks import shell
 
 STREAM_CONNECT      = 0x01
@@ -34,6 +35,9 @@ STREAM_CLOSE        = 0x10
 
 MAX_OUT_BYTES = 1 << 19 #512KB
 MAX_EXPIRE_TIME = 3600 * 24
+
+class StatOfAccessObj(Structure):
+    _fields_ = [('failed', c_int), ('succeed', c_int)]
 
 class BaseHandler(object):
     def __init__(self, local_server, local_port, server_address, server_port):
@@ -139,13 +143,13 @@ class RedisHandler(BaseHandler):
             return
         pipe = RedisHandler.r.pipeline()
         val =  '%d %s:%d %s:%d ' %(self.st, self.local_server, self.local_port, self.server_address, self.server_port)
-        RedisHandler.r.set(self.key, val, ex = MAX_EXPIRE_TIME)
-        RedisHandler.r.set(self.key_in, b''.join(self.indata), ex = MAX_EXPIRE_TIME)
+        RedisHandler.r.set(self.key, val)
+        RedisHandler.r.set(self.key_in, b''.join(self.indata))
         if self.md5 == None:
-            RedisHandler.r.set(self.key_out, b''.join(self.outdata), ex = MAX_EXPIRE_TIME)
+            RedisHandler.r.set(self.key_out, b''.join(self.outdata))
         else:
             val = 'datalen=%d digest=%s' %(self.out_len, self.md5.hexdigest())
-            RedisHandler.r.set(self.key_out, val, ex = MAX_EXPIRE_TIME)
+            RedisHandler.r.set(self.key_out, val)
         pipe.execute()
         BaseHandler.destroy(self)
 
@@ -159,7 +163,7 @@ class StreamData(object):
         self.type = type
         self.st = int(time.time())
 
-def process_stream(messages):
+def process_stream(messages, stat):
     handlers = {}
     HandlerClass = RedisHandler
     while True:
@@ -175,6 +179,11 @@ def process_stream(messages):
                 handlers[k] = m
             m.write(one.data, one.type)
             if one.type & STREAM_CLOSE:
+                if m.out_len == 0:
+                    with stat.get_lock(): stat.failed += 1
+                else:
+                    with stat.get_lock(): stat.succeed += 1
+                logging.info("%d: %d/%d" %(os.getpid(), stat.succeed, stat.failed))
                 m.destroy()
                 del handlers[k]
             del one
@@ -185,6 +194,7 @@ def process_stream(messages):
 _cpu_count = multiprocessing.cpu_count()
 _msg_queue = [multiprocessing.Queue() for x in range(_cpu_count)]
 _process = []
+_stat = multiprocessing.Value(StatOfAccessObj, 0, 0, lock=True)
 
 def add_stream(data, local_server, local_port, server_address, server_port, type):
     global _msg_queue
@@ -203,9 +213,10 @@ def children_of_stream_handler():
 def start_stream_handler():
     global _process
     global _msg_queue
+    global _stat
 
     for i in range(_cpu_count):
-        p = multiprocessing.Process(target=process_stream, args=(_msg_queue[i],))
+        p = multiprocessing.Process(target=process_stream, args=(_msg_queue[i], _stat))
         p.start()
         _process.append(p)
 
