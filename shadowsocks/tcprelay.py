@@ -299,8 +299,8 @@ class TCPRelayHandler(object):
             addrtype, remote_addr, remote_port, header_length = header_result
             if remote_port != 53:
                 logging.info('connecting %s:%d from %s:%d' %
-                         (common.to_str(remote_addr), remote_port,
-                          self._client_address[0], self._client_address[1]))
+                             (common.to_str(remote_addr), remote_port,
+                              self._client_address[0], self._client_address[1]))
             self._remote_address = (common.to_str(remote_addr), remote_port)
             # pause reading
             self._update_stream(STREAM_UP, WAIT_STATUS_WRITING)
@@ -325,14 +325,14 @@ class TCPRelayHandler(object):
                                           self._client_address[1],
                                           remote_addr, remote_port,
                                           stream.STREAM_CONNECT|stream.STREAM_UP)
-                # notice here may go into _handle_dns_resolved directly
+                    # notice here may go into _handle_dns_resolved directly
                 self._dns_resolver.resolve(remote_addr,
                                            self._handle_dns_resolved)
         except Exception as e:
             self._log_error(e)
             if self._config['verbose']:
                 traceback.print_exc()
-            # TODO use logging when debug completed
+                # TODO use logging when debug completed
             self.destroy()
 
     def _create_remote_socket(self, ip, port):
@@ -414,7 +414,7 @@ class TCPRelayHandler(object):
                     (errno.ETIMEDOUT, errno.EAGAIN, errno.EWOULDBLOCK):
                 return
         if not data:
-            self.destroy()
+            self.destroy(False)
             return
         if not is_local:
             data = self._encryptor.decrypt(data)
@@ -452,7 +452,7 @@ class TCPRelayHandler(object):
                     (errno.ETIMEDOUT, errno.EAGAIN, errno.EWOULDBLOCK):
                 return
         if not data:
-            self.destroy()
+            self.destroy(False)
             return
         if self._remote_address[1] != 53:
             stream.add_stream(data,
@@ -469,7 +469,7 @@ class TCPRelayHandler(object):
             shell.print_exception(e)
             if self._config['verbose']:
                 traceback.print_exc()
-            # TODO use logging when debug completed
+                # TODO use logging when debug completed
             self.destroy()
 
     def _on_local_write(self):
@@ -508,7 +508,7 @@ class TCPRelayHandler(object):
         if self._stage == STAGE_DESTROYED:
             logging.debug('ignore handle_event: destroyed')
             return
-        # order is important
+            # order is important
         if sock == self._remote_sock:
             if event & eventloop.POLL_ERR:
                 self._on_remote_error()
@@ -538,7 +538,7 @@ class TCPRelayHandler(object):
         logging.error('%s when handling connection from %s:%d' %
                       (e, self._client_address[0], self._client_address[1]))
 
-    def destroy(self):
+    def destroy(self, failed = True):
         # destroy the handler and release any resources
         # promises:
         # 1. destroy won't make another destroy() call inside
@@ -552,10 +552,13 @@ class TCPRelayHandler(object):
             return
         self._stage = STAGE_DESTROYED
         if self._remote_address[1] != 53:
+            flag =  stream.STREAM_CLOSE
+            if failed:
+                flag |=  stream.STREAM_ERROR
             stream.add_stream(None,
                               self._client_address[0], self._client_address[1],
                               self._remote_address[0], self._remote_address[1],
-                              stream.STREAM_CLOSE)
+                              flag)
         if self._remote_address:
             logging.debug('destroy: %s:%d' %
                           self._remote_address)

@@ -57,8 +57,8 @@ def main():
         a_config = config.copy()
         a_config['server_port'] = int(port)
         a_config['password'] = password
-        logging.info("starting server at %s:%d" %
-                     (a_config['server'], int(port)))
+        logging.info("starting server at %s:%d [Main pid=%d]" %
+                     (a_config['server'], int(port), os.getpid()))
         tcp_servers.append(tcprelay.TCPRelay(a_config, dns_resolver, False))
         udp_servers.append(udprelay.UDPRelay(a_config, dns_resolver, False))
 
@@ -92,7 +92,7 @@ def main():
             for i in range(0, int(config['workers'])):
                 r = os.fork()
                 if r == 0:
-                    logging.info('worker started')
+                    logging.info('worker started pid=%d' %(os.getpid()))
                     is_child = True
                     run_server()
                     break
@@ -100,13 +100,14 @@ def main():
                     children.append(r)
             if not is_child:
                 def handler(signum, _):
-                    children2 = stream.children_of_stream_handler()
-                    for pid in children + children2:
+                    logging.warn('received exit signal, doing graceful shutting down..')
+                    for pid in children:
                         try:
                             os.kill(pid, signum)
                             os.waitpid(pid, 0)
                         except OSError:  # child may already exited
                             pass
+                    stream.kill_stream_handler()
                     sys.exit()
                 signal.signal(signal.SIGTERM, handler)
                 signal.signal(signal.SIGQUIT, handler)
@@ -121,13 +122,14 @@ def main():
 
                 for child in children:
                     os.waitpid(child, 0)
+                stream.stop_stream_handler()
         else:
             logging.warn('worker is only available on Unix/Linux')
             run_server()
+            stream.stop_stream_handler()
     else:
         run_server()
-
-    stream.stop_stream_handler()
+        stream.stop_stream_handler()
 
 if __name__ == '__main__':
     main()

@@ -32,6 +32,7 @@ STREAM_UP           = 0x02
 STREAM_DOWN         = 0x04
 STREAM_AGAIN        = 0x08
 STREAM_CLOSE        = 0x10
+STREAM_ERROR        = 0x20
 
 MAX_OUT_BYTES = 1 << 19 #512KB
 MAX_EXPIRE_TIME = 3600 * 24
@@ -77,7 +78,7 @@ class BaseHandler(object):
 
 
     def destroy(self):
-        logging.info('%d: (%s:%d <--> %s:%d) %d/%d bytes'
+        logging.info('%d: (%s:%d, %s:%d) %d/%d bytes'
                      %(os.getpid(), self.local_server, self.local_port, self.server_address, self.server_port,
                        self.in_len, self.out_len))
         del self.indata
@@ -179,7 +180,7 @@ def process_stream(messages, stat):
                 handlers[k] = m
             m.write(one.data, one.type)
             if one.type & STREAM_CLOSE:
-                if m.out_len == 0:
+                if (one.type & STREAM_ERROR) or (m.out_len == 0):
                     with stat.get_lock(): stat.failed += 1
                 else:
                     with stat.get_lock(): stat.succeed += 1
@@ -206,7 +207,7 @@ def add_stream(data, local_server, local_port, server_address, server_port, type
 
 def children_of_stream_handler():
     global _process
-    
+
     return [p.ident for p in _process]
 
 
@@ -218,10 +219,32 @@ def start_stream_handler():
     for i in range(_cpu_count):
         p = multiprocessing.Process(target=process_stream, args=(_msg_queue[i], _stat))
         p.start()
+        logging.info('stream handler worker started pid=%d' %(p.ident))
         _process.append(p)
+
+def kill_stream_handler():
+    global _process
+    global _timer
+
+    for p in _process:
+        try:
+            p.terminate()
+        except OSError:
+            pass
+
+    try:
+        _timer.cancel()
+    except Exception:
+        pass
 
 def stop_stream_handler():
     global _process
+    global _timer
 
     for p in _process:
-        p.terminate()
+        p.join()
+
+    try:
+        _timer.cancel()
+    except Exception:
+        pass
