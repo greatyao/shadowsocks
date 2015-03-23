@@ -16,11 +16,10 @@
 # under the License.
 
 import os
-import sys
 import time
 import logging
 import multiprocessing
-import random
+import datetime
 import uuid
 import redis
 import hashlib
@@ -38,7 +37,7 @@ MAX_OUT_BYTES = 1 << 19 #512KB
 MAX_EXPIRE_TIME = 3600 * 24
 
 class StatOfAccessObj(Structure):
-    _fields_ = [('failed', c_int), ('succeed', c_int)]
+    _fields_ = [('succeed', c_int), ('failed', c_int)]
 
 class BaseHandler(object):
     def __init__(self, local_server, local_port, server_address, server_port):
@@ -76,10 +75,17 @@ class BaseHandler(object):
         elif type & STREAM_CLOSE:
             pass
 
+    def write_hourly_stat(self, stat, date0, hour):
+        logging.info('hourly statistics in %s %02d: succeed %d, failed %d'
+                     %(date0, hour, stat.succeed, stat.failed))
+
+    def write_daily_stat(self, stat, date0):
+        logging.info('daily statistics in %s: succeed %d, failed %d'
+                     %(date0, stat.succeed, stat.failed))
 
     def destroy(self):
-        logging.info('%d: (%s:%d, %s:%d) %d/%d bytes'
-                     %(os.getpid(), self.local_server, self.local_port, self.server_address, self.server_port,
+        logging.info('(%s:%d, %s:%d) %d/%d bytes'
+                     %(self.local_server, self.local_port, self.server_address, self.server_port,
                        self.in_len, self.out_len))
         del self.indata
         del self.outdata
@@ -139,6 +145,22 @@ class RedisHandler(BaseHandler):
     def write(self, data, type):
         BaseHandler.write(self, data, type)
 
+    def write_hourly_stat(self, stat, date0, hour):
+        BaseHandler.write_hourly_stat(self, stat, date0, hour)
+        key0 = 'statistics:hourly:%s:%02d' %(date0, hour)
+        pipe = RedisHandler.r.pipeline()
+        RedisHandler.r.delete(key0)
+        RedisHandler.r.rpush(key0, stat.succeed, stat.failed)
+        pipe.execute()
+
+    def write_daily_stat(self, stat, date0):
+        BaseHandler.write_daily_stat(self, stat, date0)
+        key0 = 'statistics:daily:%s' %(date0)
+        pipe = RedisHandler.r.pipeline()
+        RedisHandler.r.delete(key0)
+        RedisHandler.r.rpush(key0, stat.succeed, stat.failed)
+        pipe.execute()
+
     def destroy(self):
         if self.in_len == 0 and self.out_len == 0:
             return
@@ -164,9 +186,12 @@ class StreamData(object):
         self.type = type
         self.st = int(time.time())
 
-def process_stream(messages, stat):
+def process_stream(messages, d, lock):
     handlers = {}
     HandlerClass = RedisHandler
+    last_hour = datetime.datetime.now().hour
+    last_day = datetime.datetime.now().day
+    manager = multiprocessing.Manager()
     while True:
         try:
             if messages.empty():
@@ -180,11 +205,33 @@ def process_stream(messages, stat):
                 handlers[k] = m
             m.write(one.data, one.type)
             if one.type & STREAM_CLOSE:
+                dt = datetime.datetime.fromtimestamp(m.st)
+                dt_now = dt.date()
+                lock.acquire()
+                if d.get(dt_now, None) == None:
+                    d[dt_now] =  manager.list([0]*48)
+                thisd = d[dt_now]
+                if last_day != dt.day:
+                    delta = dt.day - last_day
+                    dt_last = dt.date()-datetime.timedelta(days=delta)
+                    lastd = d[dt_last]
+                    stat = StatOfAccessObj(lastd[last_hour*2], lastd[last_hour*2+1])
+                    m.write_hourly_stat(stat, dt_last, last_hour)
+                    stat = StatOfAccessObj(sum(d[dt_last][0::2]), sum(d[dt_last][1::2]))
+                    m.write_daily_stat(stat, dt_last)
+                    last_day = dt.day
+                    last_hour = dt.hour
+                elif last_hour != dt.hour:
+                    logging.info('%d: last %d/%d now %d/%d' %(os.getpid(), last_day, last_hour, dt.day, dt.hour))
+                    stat = StatOfAccessObj(thisd[last_hour*2], thisd[last_hour*2+1])
+                    m.write_hourly_stat(stat, dt_now, last_hour)
+                    last_hour = dt.hour
                 if (one.type & STREAM_ERROR) or (m.out_len == 0):
-                    with stat.get_lock(): stat.failed += 1
+                    thisd[last_hour*2+1] += 1
                 else:
-                    with stat.get_lock(): stat.succeed += 1
-                logging.info("%d: %d/%d" %(os.getpid(), stat.succeed, stat.failed))
+                    thisd[last_hour*2  ] += 1
+                lock.release()
+                #logging.info("%d: In %d hour %d/%d" %(os.getpid(), last_hour, thisd[2*last_hour], thisd[2*last_hour+1]))
                 m.destroy()
                 del handlers[k]
             del one
@@ -195,7 +242,6 @@ def process_stream(messages, stat):
 _cpu_count = multiprocessing.cpu_count()
 _msg_queue = [multiprocessing.Queue() for x in range(_cpu_count)]
 _process = []
-_stat = multiprocessing.Value(StatOfAccessObj, 0, 0, lock=True)
 
 def add_stream(data, local_server, local_port, server_address, server_port, type):
     global _msg_queue
@@ -210,21 +256,20 @@ def children_of_stream_handler():
 
     return [p.ident for p in _process]
 
-
 def start_stream_handler():
     global _process
     global _msg_queue
-    global _stat
 
+    d = multiprocessing.Manager().dict()
+    lock = multiprocessing.Lock()
     for i in range(_cpu_count):
-        p = multiprocessing.Process(target=process_stream, args=(_msg_queue[i], _stat))
+        p = multiprocessing.Process(target=process_stream, args=(_msg_queue[i], d, lock))
         p.start()
         logging.info('stream handler worker started pid=%d' %(p.ident))
         _process.append(p)
 
 def kill_stream_handler():
     global _process
-    global _timer
 
     for p in _process:
         try:
@@ -232,19 +277,8 @@ def kill_stream_handler():
         except OSError:
             pass
 
-    try:
-        _timer.cancel()
-    except Exception:
-        pass
-
 def stop_stream_handler():
     global _process
-    global _timer
 
     for p in _process:
         p.join()
-
-    try:
-        _timer.cancel()
-    except Exception:
-        pass
