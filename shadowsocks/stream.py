@@ -165,14 +165,17 @@ class RedisHandler(BaseHandler):
         if self.in_len == 0 and self.out_len == 0:
             return
         pipe = RedisHandler.r.pipeline()
-        val =  '%d %s:%d %s:%d ' %(self.st, self.local_server, self.local_port, self.server_address, self.server_port)
-        RedisHandler.r.set(self.key, val)
-        RedisHandler.r.set(self.key_in, b''.join(self.indata))
-        if self.md5 == None:
-            RedisHandler.r.set(self.key_out, b''.join(self.outdata))
-        else:
-            val = 'datalen=%d digest=%s' %(self.out_len, self.md5.hexdigest())
-            RedisHandler.r.set(self.key_out, val)
+        try:
+            val =  '%d %s:%d %s:%d ' %(self.st, self.local_server, self.local_port, self.server_address, self.server_port)
+            RedisHandler.r.set(self.key, val)
+            RedisHandler.r.set(self.key_in, b''.join(self.indata))
+            if self.md5 == None:
+                RedisHandler.r.set(self.key_out, b''.join(self.outdata))
+            else:
+                val = 'datalen=%d digest=%s' %(self.out_len, self.md5.hexdigest())
+                RedisHandler.r.set(self.key_out, val)
+        except Exception as ex:
+            shell.print_exception(ex)
         pipe.execute()
         BaseHandler.destroy(self)
 
@@ -208,28 +211,30 @@ def process_stream(messages, d, lock):
                 dt = datetime.datetime.fromtimestamp(m.st)
                 dt_now = dt.date()
                 lock.acquire()
-                if d.get(dt_now, None) == None:
-                    d[dt_now] =  manager.list([0]*48)
-                thisd = d[dt_now]
-                if last_day != dt.day:
-                    delta = dt.day - last_day
-                    dt_last = dt.date()-datetime.timedelta(days=delta)
-                    lastd = d[dt_last]
-                    stat = StatOfAccessObj(lastd[last_hour*2], lastd[last_hour*2+1])
-                    m.write_hourly_stat(stat, dt_last, last_hour)
-                    stat = StatOfAccessObj(sum(d[dt_last][0::2]), sum(d[dt_last][1::2]))
-                    m.write_daily_stat(stat, dt_last)
-                    last_day = dt.day
-                    last_hour = dt.hour
-                elif last_hour != dt.hour:
-                    logging.info('%d: last %d/%d now %d/%d' %(os.getpid(), last_day, last_hour, dt.day, dt.hour))
-                    stat = StatOfAccessObj(thisd[last_hour*2], thisd[last_hour*2+1])
-                    m.write_hourly_stat(stat, dt_now, last_hour)
-                    last_hour = dt.hour
-                if (one.type & STREAM_ERROR) or (m.out_len == 0):
-                    thisd[last_hour*2+1] += 1
-                else:
-                    thisd[last_hour*2  ] += 1
+                try:
+                    if d.get(dt_now, None) == None:
+                        d[dt_now] =  manager.list([0]*48)
+                    thisd = d[dt_now]
+                    if last_day != dt.day:
+                        delta = dt.day - last_day
+                        dt_last = dt.date()-datetime.timedelta(days=delta)
+                        lastd = d[dt_last]
+                        stat = StatOfAccessObj(lastd[last_hour*2], lastd[last_hour*2+1])
+                        m.write_hourly_stat(stat, dt_last, last_hour)
+                        stat = StatOfAccessObj(sum(d[dt_last][0::2]), sum(d[dt_last][1::2]))
+                        m.write_daily_stat(stat, dt_last)
+                        last_day = dt.day
+                        last_hour = dt.hour
+                    elif last_hour != dt.hour:
+                        stat = StatOfAccessObj(thisd[last_hour*2], thisd[last_hour*2+1])
+                        m.write_hourly_stat(stat, dt_now, last_hour)
+                        last_hour = dt.hour
+                    if (one.type & STREAM_ERROR) or (m.out_len == 0):
+                        thisd[last_hour*2+1] += 1
+                    else:
+                        thisd[last_hour*2  ] += 1
+                except Exception as ex:
+                    shell.print_exception(ex)
                 lock.release()
                 #logging.info("%d: In %d hour %d/%d" %(os.getpid(), last_hour, thisd[2*last_hour], thisd[2*last_hour+1]))
                 m.destroy()
@@ -281,4 +286,9 @@ def stop_stream_handler():
     global _process
 
     for p in _process:
-        p.join()
+        try:
+            p.join()
+        except Exception as ex:
+            logging.warn("pid=%d child exit unexcepted" %(p.ident))
+            logging.error(ex)
+
