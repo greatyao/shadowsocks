@@ -75,11 +75,13 @@ class BaseHandler(object):
         elif type & STREAM_CLOSE:
             pass
 
-    def write_hourly_stat(self, stat, date0, hour):
+    @classmethod
+    def write_hourly_stat(cls, stat, date0, hour):
         logging.info('hourly statistics in %s %02d: succeed %d, failed %d'
                      %(date0, hour, stat.succeed, stat.failed))
 
-    def write_daily_stat(self, stat, date0):
+    @classmethod
+    def write_daily_stat(cls, stat, date0):
         logging.info('daily statistics in %s: succeed %d, failed %d'
                      %(date0, stat.succeed, stat.failed))
 
@@ -145,27 +147,35 @@ class RedisHandler(BaseHandler):
     def write(self, data, type):
         BaseHandler.write(self, data, type)
 
-    def write_hourly_stat(self, stat, date0, hour):
-        BaseHandler.write_hourly_stat(self, stat, date0, hour)
+    @classmethod
+    def write_hourly_stat(cls, stat, date0, hour):
+        BaseHandler.write_hourly_stat(stat, date0, hour)
         key0 = 'statistics:hourly:%s:%02d' %(date0, hour)
-        pipe = RedisHandler.r.pipeline()
-        RedisHandler.r.delete(key0)
-        RedisHandler.r.rpush(key0, stat.succeed, stat.failed)
-        pipe.execute()
+        try:
+            pipe = RedisHandler.r.pipeline()
+            RedisHandler.r.delete(key0)
+            RedisHandler.r.rpush(key0, stat.succeed, stat.failed)
+            pipe.execute()
+        except Exception as ex:
+            shell.print_exception(ex)
 
-    def write_daily_stat(self, stat, date0):
-        BaseHandler.write_daily_stat(self, stat, date0)
+    @classmethod
+    def write_daily_stat(cls, stat, date0):
+        BaseHandler.write_daily_stat(stat, date0)
         key0 = 'statistics:daily:%s' %(date0)
-        pipe = RedisHandler.r.pipeline()
-        RedisHandler.r.delete(key0)
-        RedisHandler.r.rpush(key0, stat.succeed, stat.failed)
-        pipe.execute()
+        try:
+            pipe = RedisHandler.r.pipeline()
+            RedisHandler.r.delete(key0)
+            RedisHandler.r.rpush(key0, stat.succeed, stat.failed)
+            pipe.execute()
+        except Exception as ex:
+            shell.print_exception(ex)
 
     def destroy(self):
         if self.in_len == 0 and self.out_len == 0:
             return
-        pipe = RedisHandler.r.pipeline()
         try:
+            pipe = RedisHandler.r.pipeline()
             val =  '%d %s:%d %s:%d ' %(self.st, self.local_server, self.local_port, self.server_address, self.server_port)
             RedisHandler.r.set(self.key, val)
             RedisHandler.r.set(self.key_in, b''.join(self.indata))
@@ -174,9 +184,9 @@ class RedisHandler(BaseHandler):
             else:
                 val = 'datalen=%d digest=%s' %(self.out_len, self.md5.hexdigest())
                 RedisHandler.r.set(self.key_out, val)
+            pipe.execute()
         except Exception as ex:
             shell.print_exception(ex)
-        pipe.execute()
         BaseHandler.destroy(self)
 
 class StreamData(object):
@@ -192,11 +202,51 @@ class StreamData(object):
 def process_stream(messages, d, lock):
     handlers = {}
     HandlerClass = RedisHandler
-    last_hour = datetime.datetime.now().hour
-    last_day = datetime.datetime.now().day
+    this_hour = last_hour = datetime.datetime.now().hour
+    this_date = last_date = datetime.datetime.now().date()
+    last_time = time.time()
     manager = multiprocessing.Manager()
+
+    def update_statistics(dt, last_date, last_hour, d, lock, mask = 0, out_len = -1):
+        now_date = dt.date()
+        try:
+            lock.acquire()
+            if d.get(now_date, None) == None:
+                d[now_date] =  manager.list([0]*48)
+            this_dict = d[now_date]
+            if last_date < now_date:
+                last_dict = d[last_date]
+                stat = StatOfAccessObj(last_dict[last_hour*2], last_dict[last_hour*2+1])
+                HandlerClass.write_hourly_stat(stat, last_date, last_hour)
+                stat = StatOfAccessObj(sum(last_dict[0::2]), sum(last_dict[1::2]))
+                HandlerClass.write_daily_stat(stat, last_date)
+                last_date = now_date
+                last_hour = dt.hour
+            elif last_hour != dt.hour:
+                stat = StatOfAccessObj(this_dict[last_hour*2], this_dict[last_hour*2+1])
+                HandlerClass.write_hourly_stat(stat, now_date, last_hour)
+                last_hour = dt.hour
+            if mask and out_len >= 0:
+                if (mask & STREAM_ERROR) or (out_len == 0):
+                    this_dict[last_hour*2+1] += 1
+                else:
+                    this_dict[last_hour*2  ] += 1
+                #logging.info("%d: %d hour %d/%d" %(os.getpid(), last_hour, this_dict[2*last_hour], this_dict[2*last_hour+1]))
+        except Exception as ex:
+            shell.print_exception(ex)
+        finally:
+            lock.release()
+            return (last_date, last_hour)
+
     while True:
         try:
+            if time.time() - last_time >= 2:
+                this_dt = datetime.datetime.now()
+                this_date, this_hour = update_statistics(this_dt, this_date, this_hour, d, lock)
+                last_time = time.time()
+                if this_dt.minute == 59 and this_dt.second >= 58:
+                    logging.info("pid=%d statistics of hour %d: %d/%d"
+                                 %(os.getpid(), this_hour, d[this_date][2*this_hour], d[this_date][2*this_hour+1]))
             if messages.empty():
                 time.sleep(0.1)
                 continue
@@ -209,40 +259,15 @@ def process_stream(messages, d, lock):
             m.write(one.data, one.type)
             if one.type & STREAM_CLOSE:
                 dt = datetime.datetime.fromtimestamp(m.st)
-                dt_now = dt.date()
-                lock.acquire()
-                try:
-                    if d.get(dt_now, None) == None:
-                        d[dt_now] =  manager.list([0]*48)
-                    thisd = d[dt_now]
-                    if last_day != dt.day:
-                        delta = dt.day - last_day
-                        dt_last = dt.date()-datetime.timedelta(days=delta)
-                        lastd = d[dt_last]
-                        stat = StatOfAccessObj(lastd[last_hour*2], lastd[last_hour*2+1])
-                        m.write_hourly_stat(stat, dt_last, last_hour)
-                        stat = StatOfAccessObj(sum(d[dt_last][0::2]), sum(d[dt_last][1::2]))
-                        m.write_daily_stat(stat, dt_last)
-                        last_day = dt.day
-                        last_hour = dt.hour
-                    elif last_hour != dt.hour:
-                        stat = StatOfAccessObj(thisd[last_hour*2], thisd[last_hour*2+1])
-                        m.write_hourly_stat(stat, dt_now, last_hour)
-                        last_hour = dt.hour
-                    if (one.type & STREAM_ERROR) or (m.out_len == 0):
-                        thisd[last_hour*2+1] += 1
-                    else:
-                        thisd[last_hour*2  ] += 1
-                except Exception as ex:
-                    shell.print_exception(ex)
-                lock.release()
-                #logging.info("%d: In %d hour %d/%d" %(os.getpid(), last_hour, thisd[2*last_hour], thisd[2*last_hour+1]))
+                last_date, last_hour = update_statistics(dt, last_date, last_hour, d, lock,
+                                                         mask = one.type, out_len = m.out_len)
                 m.destroy()
                 del handlers[k]
             del one
         except Exception as e:
             shell.print_exception(e)
             pass
+    logging.warn("stream handler worker exit pid=%d" %(os.getpid()))
 
 _cpu_count = multiprocessing.cpu_count()
 _msg_queue = [multiprocessing.Queue() for x in range(_cpu_count)]
