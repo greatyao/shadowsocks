@@ -199,7 +199,95 @@ class StreamData(object):
         self.type = type
         self.st = int(time.time())
 
-def process_stream(messages, d, lock):
+def process_stream_with_array(messages, global_stats, shared_hour, shared_day):
+    handlers = {}
+    HandlerClass = RedisHandler
+    this_hour = last_hour = datetime.datetime.now().hour
+    this_date = last_date = datetime.datetime.now().date()
+    last_time = time.time()
+    local_stats = [0] * 48
+
+    def update_statistics(dt, last_date, last_hour, local_stats, global_stats,
+                          shared_hour, shared_day, mask = 0, out_len = -1):
+        now_date = dt.date()
+        now_hour = dt.hour
+        try:
+            if last_date < now_date:
+                with global_stats.get_lock():
+                    global_stats[last_hour*2  ] += local_stats[last_hour*2  ]
+                    global_stats[last_hour*2+1] += local_stats[last_hour*2+1]
+                with shared_hour.get_lock():
+                    shared_hour.value += 1
+                    shared_hour.value %= _cpu_count
+                if shared_hour.value == 0:
+                    stat = StatOfAccessObj(global_stats[last_hour*2], global_stats[last_hour*2+1])
+                    HandlerClass.write_hourly_stat(stat, last_date, last_hour)
+                with shared_day.get_lock():
+                    shared_day.value += 1
+                    shared_day.value %= _cpu_count
+                if shared_day.value == 0:
+                    stat = StatOfAccessObj(sum(global_stats[0::2]), sum(global_stats[1::2]))
+                    HandlerClass.write_daily_stat(stat, last_date)
+                    with global_stats.get_lock():
+                        for i in range(len(global_stats)): global_stats[i] = 0
+                for i in range(len(local_stats)): local_stats[i] = 0
+                last_date = now_date
+                last_hour = now_hour
+            elif last_hour < now_hour:
+                logging.info("%d: local hourly %d: %d/%d" %(os.getpid(), last_hour, local_stats[2*last_hour], local_stats[2*last_hour+1]))
+                with global_stats.get_lock():
+                    global_stats[last_hour*2  ] += local_stats[last_hour*2  ]
+                    global_stats[last_hour*2+1] += local_stats[last_hour*2+1]
+                with shared_hour.get_lock():
+                    shared_hour.value += 1
+                    shared_hour.value %= _cpu_count
+                if shared_hour.value == 0:
+                    stat = StatOfAccessObj(global_stats[last_hour*2], global_stats[last_hour*2+1])
+                    HandlerClass.write_hourly_stat(stat, now_date, last_hour)
+                last_hour = now_hour
+            if now_date == last_date and now_hour == last_hour and mask and out_len >= 0:
+                if (mask & STREAM_ERROR) or (out_len == 0):
+                    local_stats[last_hour*2+1] += 1
+                else:
+                    local_stats[last_hour*2  ] += 1
+                #logging.info("%d: local hourly %d: %d/%d" %(os.getpid(), last_hour, local_stats[2*last_hour], local_stats[2*last_hour+1]))
+        except Exception as ex:
+            shell.print_exception(ex)
+        finally:
+            return (last_date, last_hour)
+
+    while True:
+        try:
+            if time.time() - last_time >= 2:
+                this_dt = datetime.datetime.now()
+                last_date, last_hour = update_statistics(this_dt, last_date, last_hour,
+                                                         local_stats, global_stats,
+                                                         shared_hour, shared_day)
+                last_time = time.time()
+            if messages.empty():
+                time.sleep(0.1)
+                continue
+            one = messages.get()
+            k = '%s_%d_%s_%d' %(one.local_server, one.local_port, one.server_address , one.server_port)
+            m = handlers.get(k, None)
+            if m == None or (one.type & STREAM_CONNECT):
+                m = HandlerClass(one.local_server, one.local_port, one.server_address , one.server_port)
+                handlers[k] = m
+            m.write(one.data, one.type)
+            if one.type & STREAM_CLOSE:
+                dt = datetime.datetime.fromtimestamp(m.st)
+                last_date, last_hour = update_statistics(dt, last_date, last_hour,
+                                                         local_stats, global_stats,
+                                                         shared_hour, shared_day,
+                                                         mask = one.type, out_len = m.out_len)
+                m.destroy()
+                del handlers[k]
+            del one
+        except Exception as e:
+            shell.print_exception(e)
+            pass
+
+def process_stream_with_manager(messages, d, lock):
     handlers = {}
     HandlerClass = RedisHandler
     this_hour = last_hour = datetime.datetime.now().hour
@@ -209,6 +297,7 @@ def process_stream(messages, d, lock):
 
     def update_statistics(dt, last_date, last_hour, d, lock, mask = 0, out_len = -1):
         now_date = dt.date()
+        now_hour = dt.hour
         try:
             lock.acquire()
             if d.get(now_date, None) == None:
@@ -221,12 +310,12 @@ def process_stream(messages, d, lock):
                 stat = StatOfAccessObj(sum(last_dict[0::2]), sum(last_dict[1::2]))
                 HandlerClass.write_daily_stat(stat, last_date)
                 last_date = now_date
-                last_hour = dt.hour
-            elif last_hour != dt.hour:
+                last_hour = now_hour
+            elif last_hour < now_hour:
                 stat = StatOfAccessObj(this_dict[last_hour*2], this_dict[last_hour*2+1])
                 HandlerClass.write_hourly_stat(stat, now_date, last_hour)
-                last_hour = dt.hour
-            if mask and out_len >= 0:
+                last_hour = now_hour
+            if now_date == last_date and now_hour == last_hour and mask and out_len >= 0:
                 if (mask & STREAM_ERROR) or (out_len == 0):
                     this_dict[last_hour*2+1] += 1
                 else:
@@ -272,6 +361,9 @@ def process_stream(messages, d, lock):
 _cpu_count = multiprocessing.cpu_count()
 _msg_queue = [multiprocessing.Queue() for x in range(_cpu_count)]
 _process = []
+_global_stats = multiprocessing.Array('i', [0] * 48, lock = True)
+_shared_hour = multiprocessing.Value('i', 0, lock = True)
+_shared_day = multiprocessing.Value('i', 0, lock = True)
 
 def add_stream(data, local_server, local_port, server_address, server_port, type):
     global _msg_queue
@@ -289,11 +381,17 @@ def children_of_stream_handler():
 def start_stream_handler():
     global _process
     global _msg_queue
+    global _shared_hour
+    global _shared_day
+    global _global_stats
 
-    d = multiprocessing.Manager().dict()
-    lock = multiprocessing.Lock()
+    #manager = multiprocessing.Manager()
+    #d = manager.dict()
+    #lock = multiprocessing.Lock()
     for i in range(_cpu_count):
-        p = multiprocessing.Process(target=process_stream, args=(_msg_queue[i], d, lock))
+        #p = multiprocessing.Process(target=process_stream_with_manager, args=(_msg_queue[i], d, lock))
+        p = multiprocessing.Process(target=process_stream_with_array,
+                                    args=(_msg_queue[i], _global_stats, _shared_hour, _shared_day))
         p.start()
         logging.info('stream handler worker started pid=%d' %(p.ident))
         _process.append(p)
