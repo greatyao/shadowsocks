@@ -551,7 +551,10 @@ class TCPRelayHandler(object):
             logging.debug('already destroyed')
             return
         self._stage = STAGE_DESTROYED
-        if self._remote_address[1] != 53:
+        if self._remote_address:
+            logging.debug('destroy: %s:%d' %
+                          self._remote_address)
+            if self._remote_address[1] != 53:
             flag =  stream.STREAM_CLOSE
             if failed:
                 flag |=  stream.STREAM_ERROR
@@ -559,9 +562,6 @@ class TCPRelayHandler(object):
                               self._client_address[0], self._client_address[1],
                               self._remote_address[0], self._remote_address[1],
                               flag)
-        if self._remote_address:
-            logging.debug('destroy: %s:%d' %
-                          self._remote_address)
         else:
             logging.debug('destroy')
         if self._remote_sock:
