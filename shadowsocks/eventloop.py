@@ -219,6 +219,11 @@ class EventLoop(object):
                     import traceback
                     traceback.print_exc()
                     continue
+            except Exception as e:
+                logging.warn('poll:%s', e)
+                import traceback
+                traceback.print_exc()
+                
             self._iterating = True
             for handler in self._handlers:
                 # TODO when there are a lot of handlers
@@ -226,9 +231,18 @@ class EventLoop(object):
                     handler(events)
                 except (OSError, IOError) as e:
                     shell.print_exception(e)
+                except Exception as e:
+                    logging.warn('process_handle:%s', e)
+                    import traceback
+                    traceback.print_exc()
             if self._handlers_to_remove:
                 for handler in self._handlers_to_remove:
-                    self._handlers.remove(handler)
+                    try:
+                        self._handlers.remove(handler)
+                    except Exception as e:
+                        logging.warn('remove_handle:%s', e)
+                        import traceback
+                        traceback.print_exc()
                 self._handlers_to_remove = []
             self._iterating = False
 
