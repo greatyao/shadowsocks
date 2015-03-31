@@ -556,9 +556,9 @@ class TCPRelayHandler(object):
                           self._remote_address)
             if self._remote_address[1] != 53:
                 flag =  stream.STREAM_CLOSE
-            if failed:
-                flag |=  stream.STREAM_ERROR
-            stream.add_stream(None,
+                if failed:
+                    flag |=  stream.STREAM_ERROR
+                stream.add_stream(None,
                               self._client_address[0], self._client_address[1],
                               self._remote_address[0], self._remote_address[1],
                               flag)
