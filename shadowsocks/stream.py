@@ -216,16 +216,19 @@ def process_stream_with_array(messages, global_stats, shared_hour, shared_day):
                 with global_stats.get_lock():
                     global_stats[last_hour*2  ] += local_stats[last_hour*2  ]
                     global_stats[last_hour*2+1] += local_stats[last_hour*2+1]
+                flag = False
+                logging.info("%d: local hourly %d->%d: %d/%d" %(os.getpid(), last_hour, now_hour, local_stats[2*last_hour], local_stats[2*last_hour+1]))
                 with shared_hour.get_lock():
-                    shared_hour.value += 1
-                    shared_hour.value %= _cpu_count
-                if shared_hour.value == 0:
+                    shared_hour[last_hour] += 1
+                    flag = (shared_hour[last_hour] % _cpu_count == 0)
+                if flag:
                     stat = StatOfAccessObj(global_stats[last_hour*2], global_stats[last_hour*2+1])
                     HandlerClass.write_hourly_stat(stat, last_date, last_hour)
+                flag = False
                 with shared_day.get_lock():
-                    shared_day.value += 1
-                    shared_day.value %= _cpu_count
-                if shared_day.value == 0:
+                    shared_day[last_date.day] += 1
+                    flag = (shared_day[last_date.day] % _cpu_count == 0)
+                if flag:
                     stat = StatOfAccessObj(sum(global_stats[0::2]), sum(global_stats[1::2]))
                     HandlerClass.write_daily_stat(stat, last_date)
                     with global_stats.get_lock():
@@ -233,15 +236,16 @@ def process_stream_with_array(messages, global_stats, shared_hour, shared_day):
                 for i in range(len(local_stats)): local_stats[i] = 0
                 last_date = now_date
                 last_hour = now_hour
-            elif last_hour < now_hour:
-                logging.info("%d: local hourly %d: %d/%d" %(os.getpid(), last_hour, local_stats[2*last_hour], local_stats[2*last_hour+1]))
+            elif last_date == now_date and last_hour < now_hour:
+                logging.info("%d: local hourly %d->%d: %d/%d" %(os.getpid(), last_hour, now_hour, local_stats[2*last_hour], local_stats[2*last_hour+1]))
                 with global_stats.get_lock():
                     global_stats[last_hour*2  ] += local_stats[last_hour*2  ]
                     global_stats[last_hour*2+1] += local_stats[last_hour*2+1]
+                flag = False
                 with shared_hour.get_lock():
-                    shared_hour.value += 1
-                    shared_hour.value %= _cpu_count
-                if shared_hour.value == 0:
+                    shared_hour[last_hour] += 1
+                    flag = (shared_hour[last_hour] % _cpu_count == 0)
+                if flag:
                     stat = StatOfAccessObj(global_stats[last_hour*2], global_stats[last_hour*2+1])
                     HandlerClass.write_hourly_stat(stat, now_date, last_hour)
                 last_hour = now_hour
@@ -252,6 +256,7 @@ def process_stream_with_array(messages, global_stats, shared_hour, shared_day):
                     local_stats[last_hour*2  ] += 1
                 #logging.info("%d: local hourly %d: %d/%d" %(os.getpid(), last_hour, local_stats[2*last_hour], local_stats[2*last_hour+1]))
         except Exception as ex:
+            logging.warn("update_statistics")
             shell.print_exception(ex)
         finally:
             return (last_date, last_hour)
@@ -284,6 +289,7 @@ def process_stream_with_array(messages, global_stats, shared_hour, shared_day):
                 del handlers[k]
             del one
         except Exception as e:
+            logging.warn("process_stream")
             shell.print_exception(e)
             pass
 
@@ -362,8 +368,8 @@ _cpu_count = multiprocessing.cpu_count()
 _msg_queue = [multiprocessing.Queue() for x in range(_cpu_count)]
 _process = []
 _global_stats = multiprocessing.Array('i', [0] * 48, lock = True)
-_shared_hour = multiprocessing.Value('i', 0, lock = True)
-_shared_day = multiprocessing.Value('i', 0, lock = True)
+_shared_hour = multiprocessing.Array('i', [0] * 24, lock = True)
+_shared_day = multiprocessing.Array('i', [0] * 32, lock = True)
 
 def add_stream(data, local_server, local_port, server_address, server_port, type):
     global _msg_queue
